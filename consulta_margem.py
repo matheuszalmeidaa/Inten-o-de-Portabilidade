@@ -431,10 +431,14 @@ def fazer_login(page, usuario, senha):
             return
         alerta = capturar_alerta(page)
         if alerta and alerta != alerta_antes:
+            # mostra só o que APARECEU de novo (não o texto que já estava lá)
+            novidade = alerta
+            if alerta_antes and alerta_antes in alerta:
+                novidade = alerta.replace(alerta_antes, "").strip(" |").strip()
             diagnostico_pagina(page, "login_recusado")
             raise RuntimeError(
-                f"O site recusou o login: \"{alerta}\" — confira usuário e "
-                "senha na seção CONFIGURAÇÃO do consulta_margem.py.")
+                f"O site recusou o login: \"{novidade or alerta}\" — confira "
+                "usuário e senha na seção CONFIGURAÇÃO do consulta_margem.py.")
         if not tentou_enter and time.time() - inicio > 15:
             print("[login] ainda na tela de login — tentando ENTER no campo de senha...")
             try:
@@ -684,7 +688,11 @@ def extrair_dados(page):
 
 
 def capturar_alerta(page):
-    """Texto de toast/alerta visível na tela (ex.: 'CPF não encontrado')."""
+    """Texto de aviso/erro visível na tela (ex.: 'CPF não encontrado').
+
+    Ignora indicadores de carregamento ('Aguarde...', 'Carregando...') para
+    não confundir espera com erro, e junta os avisos distintos encontrados.
+    """
     try:
         texto = page.evaluate(
             "() => {" + JS_VISIVEL + """
@@ -693,8 +701,12 @@ def capturar_alerta(page):
                 "[class*='swal' i], [class*='error' i], [class*='erro' i], " +
                 "[class*='invalid' i], [class*='danger' i]"))
                 .filter(vis);
-            const txts = els.map(e => (e.innerText || '').trim()).filter(Boolean);
-            return txts.length ? txts[0].slice(0, 200) : null;
+            const textos = els
+                .map(e => (e.innerText || '').replace(/\\s+/g, ' ').trim())
+                .filter(t => t && t.length <= 250)
+                .filter(t => !/aguarde|carregando|processando|loading/i.test(t));
+            const unicos = Array.from(new Set(textos));
+            return unicos.length ? unicos.join(' | ').slice(0, 300) : null;
             }"""
         )
     except Exception:

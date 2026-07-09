@@ -438,9 +438,7 @@ def fazer_login(page, usuario, senha):
         alerta = capturar_alerta(page)
         if alerta and alerta != alerta_antes:
             # mostra só o que APARECEU de novo (não o texto que já estava lá)
-            novidade = alerta
-            if alerta_antes and alerta_antes in alerta:
-                novidade = alerta.replace(alerta_antes, "").strip(" |").strip()
+            novidade = _novidade_alerta(alerta, alerta_antes)
             diagnostico_pagina(page, "login_recusado")
             raise RuntimeError(
                 f"O site recusou o login: \"{novidade or alerta}\" — confira "
@@ -498,7 +496,6 @@ def garantir_logado_na_consulta(page, usuario, senha):
 
 def preencher_e_consultar(page, cpf):
     campo = page.locator(SELETOR_CAMPO_CPF).first
-    campo.click()
     campo.fill(cpf)
     # Se existir o seletor de tipo (Benefício / CPF), garante que está em CPF.
     page.evaluate(
@@ -573,6 +570,40 @@ def escolher_nb_e_confirmar(page, valor):
     if not ok:
         raise RuntimeError("Não encontrei o select de NB no modal.")
     clicar_por_texto(page, r"^\s*OK\s*$")
+
+
+def fechar_avisos(page):
+    """Fecha pop-ups de aviso (SweetAlert etc.) que bloqueiam a tela.
+
+    Ex.: "Não foram encontrados dados!" fica aberto na frente de tudo e trava
+    os cliques dos próximos CPFs. Não mexe no modal de NB (fluxo próprio).
+    """
+    for _ in range(3):  # pode haver avisos empilhados
+        try:
+            fechou = page.evaluate(
+                "() => {" + JS_VISIVEL + """
+                const conts = Array.from(document.querySelectorAll(
+                    ".swal2-container, .sweet-alert, [class*='swal' i]"))
+                    .filter(vis)
+                    .filter(c => !/mais de uma matr/i.test(c.innerText || ''));
+                for (const c of conts) {
+                    const botoes = Array.from(c.querySelectorAll(
+                        "button, input[type='button'], a")).filter(vis);
+                    const alvo = botoes.find(b => /confirm/i.test(b.className || ''))
+                        || botoes.find(b => /^(ok|fechar|entendi|sim|continuar)$/i
+                            .test(((b.innerText || b.value) || '').trim()))
+                        || botoes.find(b => /close|cancel/i.test(b.className || ''))
+                        || botoes[0];
+                    if (alvo) { alvo.click(); return true; }
+                }
+                return false;
+                }"""
+            )
+        except Exception:
+            return
+        if not fechou:
+            return
+        time.sleep(0.4)
 
 
 def fechar_modal_se_aberto(page):
@@ -725,12 +756,26 @@ def capturar_alerta(page):
     return texto
 
 
+def _novidade_alerta(alerta, antes):
+    """Devolve só a parte do aviso que APARECEU agora (tira o que já havia)."""
+    if not alerta:
+        return None
+    if antes and antes in alerta:
+        alerta = alerta.replace(antes, "").strip(" |").strip()
+    return alerta or None
+
+
 # ---------------------------------------------------------------------------
 # Espera pelo desfecho da consulta
 # ---------------------------------------------------------------------------
 
-def aguardar_desfecho(page, dados_antes, timeout_s):
-    """Espera até: modal de NB abrir ('modal') ou o card mudar ('resultado')."""
+def aguardar_desfecho(page, dados_antes, timeout_s, alerta_antes=None):
+    """Espera o desfecho da consulta: 'modal', 'resultado', 'alerta' ou 'timeout'.
+
+    'alerta' = o site exibiu um aviso novo (ex.: "Não foram encontrados
+    dados!"), o que resolve CPFs sem cadastro em segundos, sem esperar o
+    timeout inteiro.
+    """
     fim = time.time() + timeout_s
     while time.time() < fim:
         if modal_nb_visivel(page):
@@ -739,6 +784,10 @@ def aguardar_desfecho(page, dados_antes, timeout_s):
         if dados.get("nome") and dados != dados_antes:
             time.sleep(1.2)  # deixa a tela terminar de renderizar
             return "resultado"
+        alerta = capturar_alerta(page)
+        if (alerta and alerta != alerta_antes
+                and not re.search(r"mais de uma matr", alerta, re.I)):
+            return "alerta"
         time.sleep(0.7)
     return "timeout"
 
@@ -816,10 +865,12 @@ def screenshot_debug(page, nome):
 def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
     garantir_logado_na_consulta(page, usuario, senha)
     fechar_modal_se_aberto(page)
+    fechar_avisos(page)  # pop-up esquecido do CPF anterior bloquearia este
 
+    alerta_antes = capturar_alerta(page)
     dados_antes = extrair_dados(page)
     preencher_e_consultar(page, cpf)
-    desfecho = aguardar_desfecho(page, dados_antes, timeout_s)
+    desfecho = aguardar_desfecho(page, dados_antes, timeout_s, alerta_antes)
 
     # ------- caso 1: modal "CPF com mais de uma Matrícula" -------
     if desfecho == "modal":
@@ -836,7 +887,8 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
                 # reconsulta o mesmo CPF para reabrir o modal e pegar o próximo NB
                 dados_antes = extrair_dados(page)
                 preencher_e_consultar(page, cpf)
-                if aguardar_desfecho(page, dados_antes, timeout_s) != "modal":
+                if aguardar_desfecho(page, dados_antes, timeout_s,
+                                     alerta_antes) != "modal":
                     screenshot_debug(page, f"{cpf}_modal_nao_reabriu")
                     escritor.gravar(cpf, limpar_nb(opcao["texto"]), {},
                                     "ERRO: modal não reabriu para este NB")
@@ -861,7 +913,30 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
                   f"margem {dados.get('margem') or '-'} | {status}")
         return
 
-    # ------- caso 2: resultado direto (uma matrícula só) -------
+    # ------- caso 2: o site exibiu um aviso (ex.: "Não foram encontrados
+    # dados!") — fecha o pop-up para não travar os próximos CPFs -------
+    if desfecho == "alerta":
+        msg = _novidade_alerta(capturar_alerta(page), alerta_antes)
+        fechar_avisos(page)
+        # alguns avisos são só informativos e os dados carregam em seguida
+        fim_graca = time.time() + 5
+        dados = extrair_dados(page)
+        while (time.time() < fim_graca
+               and not (dados.get("nome") and dados != dados_antes)):
+            time.sleep(0.6)
+            dados = extrair_dados(page)
+        if dados.get("nome") and dados != dados_antes:
+            status = "OK" + (f" (aviso: {msg})" if msg else "")
+            escritor.gravar(cpf, "", dados, status)
+            print(f"    -> {dados.get('nome')} | margem "
+                  f"{dados.get('margem') or '-'} | {status}")
+        else:
+            status = f"SEM RESULTADO: {msg or 'aviso do site'}"
+            escritor.gravar(cpf, "", {}, status)
+            print(f"    -> {status}")
+        return
+
+    # ------- caso 3: resultado direto (uma matrícula só) -------
     dados = extrair_dados(page)
     mudou = dados.get("nome") and dados != dados_antes
     if desfecho == "resultado" or mudou:
@@ -870,13 +945,14 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
               f" | situação {dados.get('situacao') or '-'}")
         return
 
-    # ------- caso 3: nada aconteceu (CPF não encontrado / erro / lentidão) ---
+    # ------- caso 4: nada aconteceu (erro / lentidão extrema) -------
     # a tela não mudou, então o card visível (se houver) é do CPF anterior:
     # grava a linha vazia para não misturar dados de outra pessoa.
-    alerta = capturar_alerta(page)
+    alerta = _novidade_alerta(capturar_alerta(page), alerta_antes)
     status = f"SEM RESULTADO: {alerta}" if alerta else \
         "SEM RESULTADO (tempo esgotado — ver print em debug/)"
     screenshot_debug(page, f"{cpf}_sem_resultado")
+    fechar_avisos(page)
     escritor.gravar(cpf, "", {}, status)
     print(f"    -> {status}")
 
@@ -1030,8 +1106,15 @@ def main():
                         raise
                     except Exception as e:
                         if tentativa == 1:
-                            print(f"    !! erro ({e}); tentando de novo...")
+                            print(f"    !! erro ({e}); recarregando a tela e "
+                                  "tentando de novo...")
+                            try:
+                                page.reload(wait_until="domcontentloaded")
+                                _esperar_pagina_assentar(page)
+                            except Exception:
+                                pass
                             fechar_modal_se_aberto(page)
+                            fechar_avisos(page)
                             try:
                                 ir_para_consulta(page, usuario, senha)
                             except Exception:

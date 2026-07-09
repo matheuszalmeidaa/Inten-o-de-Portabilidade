@@ -4,18 +4,6 @@ Automação que lê os CPFs da coluna **CPF Cliente** da planilha (aba *Pagina1*
 e consulta um por um na tela **CONSULTAS** do Multiplus
 (`multiplus.consignadorapido.com`), coletando:
 
-| Campo | Exemplo |
-|---|---|
-| CPF | 01715717970 |
-| NB (matrícula/benefício) | 1082967022 |
-| Nome | MARIA DE LOURDES ROCHA DE OLIVEIRA |
-| Idade | 62 Anos |
-| Margem 40 | R$ 36,05 |
-| Margem Cartão | R$ 0,00 |
-| Valor Benefício | R$ 1.621,00 |
-| Situação | ATIVO |
-| Espécie | 21 |
-
 ## Como o robô funciona
 
 1. Faz login no Multiplus com o usuário/senha do arquivo `.env`;

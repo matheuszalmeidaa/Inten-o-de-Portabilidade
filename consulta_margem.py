@@ -35,7 +35,8 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv()  # .env da pasta atual
+    load_dotenv(Path(__file__).resolve().parent / ".env")  # .env ao lado do script
 except ImportError:
     pass
 
@@ -697,6 +698,14 @@ def main():
         cpfs = cpfs[:args.limite]
     if not cpfs:
         sys.exit("Nenhum CPF para consultar.")
+
+    # Em servidor Linux sem interface gráfica não dá para abrir a janela do
+    # navegador: liga o modo invisível automaticamente.
+    if (not args.headless and sys.platform.startswith("linux")
+            and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
+        print("[aviso] servidor sem tela detectado — rodando em modo invisível "
+              "(--headless). Prints de erro continuam saindo na pasta debug/.")
+        args.headless = True
 
     saida = args.saida or DIR_RESULTADOS / \
         f"resultados_margem_{datetime.now():%Y%m%d_%H%M%S}.csv"

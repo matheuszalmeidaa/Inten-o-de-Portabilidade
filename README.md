@@ -47,6 +47,28 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
+### Instalação em servidor Linux (VPS, sem tela)
+
+No Ubuntu/Debian, rode como root na pasta onde está o `consulta_margem.py`:
+
+```bash
+python3 -m pip install playwright pandas python-dotenv requests openpyxl
+# se aparecer o erro "externally-managed-environment", use:
+#   python3 -m pip install --break-system-packages playwright pandas python-dotenv requests openpyxl
+
+python3 -m playwright install --with-deps chromium
+# se o --with-deps falhar, rode em dois passos:
+#   python3 -m playwright install chromium
+#   python3 -m playwright install-deps chromium
+```
+
+> Use `python3 -m playwright ...` (e não só `playwright ...`): funciona mesmo
+> quando o comando não entrou no PATH.
+
+Num servidor sem interface gráfica o robô percebe que não há tela e roda em
+modo invisível automaticamente. Para acompanhar, olhe o que ele imprime no
+terminal e os arquivos das pastas `resultados/` e `debug/`.
+
 ## Configuração
 
 1. Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`);

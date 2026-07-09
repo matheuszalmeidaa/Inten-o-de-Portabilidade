@@ -248,14 +248,68 @@ def registrar_dialogos(page):
     page.on("dialog", _handler)
 
 
+# campo "Digite a Matrícula ou CPF" da tela de consulta
+SELETOR_CAMPO_CPF = "input[placeholder*='cpf' i], input[placeholder*='matr' i]"
+
+
+def _esperar_pagina_assentar(page, timeout_ms=15000):
+    """Espera a página (SPA) terminar de baixar/renderizar, sem travar."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+
+
+def diagnostico_pagina(page, nome):
+    """Salva print + detalhes da tela em debug/ para investigar problemas."""
+    try:
+        DIR_DEBUG.mkdir(parents=True, exist_ok=True)
+        ts = f"{datetime.now():%Y%m%d_%H%M%S}"
+        png = DIR_DEBUG / f"{nome}_{ts}.png"
+        page.screenshot(path=str(png), full_page=True)
+        info = [f"URL: {page.url}", f"Titulo: {page.title()}", "", "Campos visiveis:"]
+        try:
+            campos = page.evaluate(
+                "() => {" + JS_VISIVEL + """
+                return Array.from(document.querySelectorAll('input, select, button'))
+                    .filter(vis).slice(0, 30)
+                    .map(e => e.tagName + ' type=' + (e.type || '') +
+                              ' placeholder=' + (e.placeholder || '') +
+                              ' id=' + (e.id || '') +
+                              ' texto=' + ((e.innerText || e.value || '').trim().slice(0, 40)));
+                }"""
+            )
+            info.extend("  " + c for c in campos)
+        except Exception:
+            info.append("  (não consegui listar)")
+        try:
+            texto = page.evaluate(
+                "() => ((document.body && document.body.innerText) || '').slice(0, 1500)")
+            info.append("")
+            info.append("Texto da pagina:")
+            info.append(texto)
+        except Exception:
+            pass
+        txt = DIR_DEBUG / f"{nome}_{ts}.txt"
+        txt.write_text("\n".join(info), encoding="utf-8")
+        print(f"    [debug] print salvo:    {png}")
+        print(f"    [debug] detalhes salvos: {txt}")
+    except Exception as e:
+        print(f"    [debug] não consegui salvar diagnóstico: {e}")
+
+
 def fazer_login(page, usuario, senha):
     page.goto(BASE_URL, wait_until="domcontentloaded")
+    _esperar_pagina_assentar(page)
     senha_input = page.locator("input[type='password']")
     try:
-        senha_input.first.wait_for(state="visible", timeout=15000)
+        senha_input.first.wait_for(state="visible", timeout=30000)
     except PWTimeout:
-        return  # não há tela de login: sessão já está ativa
-    # campo de usuário: primeiro input de texto visível
+        # sem campo de senha: ou a sessão já está ativa, ou o site mostrou
+        # outra coisa — registra diagnóstico e deixa a próxima etapa decidir
+        print(f"[login] tela de login não apareceu (URL atual: {page.url})")
+        diagnostico_pagina(page, "login_nao_apareceu")
+        return
     user_input = page.locator(
         "input[type='text'], input:not([type]), input[type='email']").first
     user_input.fill(usuario)
@@ -264,29 +318,43 @@ def fazer_login(page, usuario, senha):
     try:
         senha_input.first.wait_for(state="hidden", timeout=60000)
     except PWTimeout:
+        diagnostico_pagina(page, "login_falhou")
         raise RuntimeError(
             "Falha no login: a tela de login não fechou. Confira usuário e "
             "senha na seção CONFIGURAÇÃO do consulta_margem.py (ou no .env)."
         )
+    _esperar_pagina_assentar(page)
     print("[login] OK")
 
 
-def ir_para_consulta(page):
+def ir_para_consulta(page, usuario=None, senha=None):
     if "/consulta/consultas" not in page.url:
         page.goto(CONSULTA_URL, wait_until="domcontentloaded")
-    page.locator("input[placeholder*='CPF']").first.wait_for(
-        state="visible", timeout=30000)
+        _esperar_pagina_assentar(page)
+    # se o site redirecionou para o login, autentica e volta
+    try:
+        if page.locator("input[type='password']").first.is_visible() and usuario and senha:
+            print("[sessão] caiu na tela de login — autenticando...")
+            fazer_login(page, usuario, senha)
+            page.goto(CONSULTA_URL, wait_until="domcontentloaded")
+            _esperar_pagina_assentar(page)
+    except Exception:
+        pass
+    try:
+        page.locator(SELETOR_CAMPO_CPF).first.wait_for(
+            state="visible", timeout=60000)
+    except PWTimeout:
+        diagnostico_pagina(page, "consulta_nao_carregou")
+        raise RuntimeError(
+            "A tela de Consultas não carregou (o campo 'Digite a Matrícula ou "
+            f"CPF' não apareceu). URL atual: {page.url} — veja o print e o "
+            f"arquivo de detalhes na pasta {DIR_DEBUG}/ e me envie."
+        )
 
 
 def garantir_logado_na_consulta(page, usuario, senha):
-    """Se a sessão caiu (voltou pra tela de login), loga de novo."""
-    try:
-        if page.locator("input[type='password']").first.is_visible(timeout=1000):
-            print("[sessão] expirou — refazendo login...")
-            fazer_login(page, usuario, senha)
-    except Exception:
-        pass
-    ir_para_consulta(page)
+    """Garante sessão ativa e a tela de consulta aberta (reloga se caiu)."""
+    ir_para_consulta(page, usuario, senha)
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +362,7 @@ def garantir_logado_na_consulta(page, usuario, senha):
 # ---------------------------------------------------------------------------
 
 def preencher_e_consultar(page, cpf):
-    campo = page.locator("input[placeholder*='CPF']").first
+    campo = page.locator(SELETOR_CAMPO_CPF).first
     campo.click()
     campo.fill(cpf)
     # Se existir o seletor de tipo (Benefício / CPF), garante que está em CPF.
@@ -744,15 +812,34 @@ def main():
 
     erros = 0
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=args.headless)
+        opcoes_chromium = {
+            "headless": args.headless,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        try:
+            # usa o Chromium completo (mais parecido com um navegador normal)
+            browser = pw.chromium.launch(channel="chromium", **opcoes_chromium)
+        except Exception:
+            browser = pw.chromium.launch(**opcoes_chromium)
+
+        # user-agent sem a marca "HeadlessChrome", que alguns sites bloqueiam
+        ua = None
+        try:
+            sonda = browser.new_page()
+            ua = sonda.evaluate("navigator.userAgent")
+            sonda.close()
+            ua = ua.replace("HeadlessChrome", "Chrome")
+        except Exception:
+            ua = None
+        extras = {"user_agent": ua} if ua else {}
         contexto = browser.new_context(
-            viewport={"width": 1440, "height": 900}, locale="pt-BR")
+            viewport={"width": 1440, "height": 900}, locale="pt-BR", **extras)
         page = contexto.new_page()
         page.set_default_timeout(30000)
         registrar_dialogos(page)
 
         fazer_login(page, usuario, senha)
-        ir_para_consulta(page)
+        ir_para_consulta(page, usuario, senha)
 
         try:
             for i, cpf in enumerate(cpfs, 1):
@@ -769,7 +856,7 @@ def main():
                             print(f"    !! erro ({e}); tentando de novo...")
                             fechar_modal_se_aberto(page)
                             try:
-                                ir_para_consulta(page)
+                                ir_para_consulta(page, usuario, senha)
                             except Exception:
                                 pass
                         else:

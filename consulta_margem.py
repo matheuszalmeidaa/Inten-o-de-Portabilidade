@@ -29,7 +29,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -711,8 +711,11 @@ def capturar_alerta(page):
                 .map(e => (e.innerText || '').replace(/\\s+/g, ' ').trim())
                 .filter(t => t && t.length <= 250)
                 .filter(t => !/aguarde|carregando|processando|loading/i.test(t));
-            const unicos = Array.from(new Set(textos));
-            return unicos.length ? unicos.join(' | ').slice(0, 300) : null;
+            let cands = Array.from(new Set(textos)).filter(t => t.length >= 4);
+            // fica só com as mensagens mínimas (descarta containers que
+            // englobam outras, ex.: o quadro inteiro que contém o toast)
+            cands = cands.filter(t => !cands.some(o => o !== t && t.includes(o)));
+            return cands.length ? cands.join(' | ').slice(0, 300) : null;
             }"""
         )
     except Exception:
@@ -879,6 +882,33 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
 
 
 # ---------------------------------------------------------------------------
+# Barra de progresso
+# ---------------------------------------------------------------------------
+
+def _fmt_tempo(segundos):
+    segundos = int(max(0, segundos))
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h}h{m:02d}min" if h else (f"{m}min{s:02d}s" if m else f"{s}s")
+
+
+def barra_progresso(atual, total, inicio_ts, linhas):
+    """Imprime: [████░░░░] 32% | 82/258 | decorrido | restante | término."""
+    frac = atual / total if total else 1.0
+    cheio = int(round(frac * 28))
+    barra = "█" * cheio + "░" * (28 - cheio)
+    decorrido = time.time() - inicio_ts
+    if 0 < atual < total:
+        restante = decorrido / atual * (total - atual)
+        previsao = datetime.now() + timedelta(seconds=restante)
+        extra = f" | restante ~{_fmt_tempo(restante)} | término ~{previsao:%H:%M}"
+    else:
+        extra = ""
+    print(f"[{barra}] {frac * 100:3.0f}% | {atual}/{total} CPFs | "
+          f"{linhas} linha(s) no arquivo | decorrido {_fmt_tempo(decorrido)}{extra}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -987,6 +1017,7 @@ def main():
         fazer_login(page, usuario, senha)
         ir_para_consulta(page, usuario, senha)
 
+        inicio_lote = time.time()
         try:
             for i, cpf in enumerate(cpfs, 1):
                 print(f"[{i}/{len(cpfs)}] CPF {cpf}")
@@ -1010,7 +1041,9 @@ def main():
                             screenshot_debug(page, f"{cpf}_erro")
                             escritor.gravar(cpf, "", {}, f"ERRO: {str(e)[:150]}")
                             print(f"    !! falhou de vez: {e}")
-                time.sleep(args.pausa)
+                barra_progresso(i, len(cpfs), inicio_lote, escritor.linhas)
+                if i < len(cpfs):  # no último CPF encerra direto, sem pausa
+                    time.sleep(args.pausa)
         except KeyboardInterrupt:
             print("\n[interrompido] resultados parciais já estão salvos no CSV.")
         finally:

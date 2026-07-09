@@ -1,0 +1,12 @@
+# Credenciais — nunca versionar
+.env
+
+# Saídas geradas pelo robô
+resultados/
+debug/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

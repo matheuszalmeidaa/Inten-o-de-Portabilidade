@@ -44,11 +44,37 @@ import pandas as pd
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ---------------------------------------------------------------------------
-# Configuração
-# ---------------------------------------------------------------------------
+# ===========================================================================
+#  CONFIGURAÇÃO — EDITE AQUI
+#
+#  Preencha os valores entre as aspas. O que ficar em branco ("") o robô
+#  tenta buscar num arquivo .env na mesma pasta (opcional).
+#
+#  ⚠ ATENÇÃO: com a senha preenchida aqui, NUNCA envie este arquivo para o
+#    GitHub nem compartilhe com quem não deva ter acesso.
+# ===========================================================================
+MULTIPLUS_USUARIO = ""            # ex.: "KALLYANEOPERACIONAL"
+MULTIPLUS_SENHA = ""              # ex.: "minha_senha"
+PLANILHA_URL = ("https://docs.google.com/spreadsheets/d/"
+                "1Fln-LwllZyS3SRgBb1psLKmdLRszxoZYV0waD9AyvOM/edit?gid=0#gid=0")
+COLUNA_CPF = "CPF Cliente"        # coluna da planilha que tem os CPFs
+MULTIPLUS_URL = "https://multiplus.consignadorapido.com"
+HEADLESS = False                  # True = não abre a janela do navegador
+TIMEOUT_CONSULTA = 90             # segundos de espera por consulta
+PAUSA_ENTRE_CONSULTAS = 1.0       # pausa (s) entre um CPF e outro
+# ===========================================================================
+#  Fim da configuração — daqui para baixo não precisa mexer.
+# ===========================================================================
 
-BASE_URL = os.getenv("MULTIPLUS_URL", "https://multiplus.consignadorapido.com").rstrip("/")
+
+def _cfg(valor_no_script, nome_env, padrao=""):
+    """O valor preenchido no script tem prioridade; em branco, usa o .env."""
+    v = str(valor_no_script).strip() if valor_no_script is not None else ""
+    return v if v else os.getenv(nome_env, padrao)
+
+
+BASE_URL = _cfg(MULTIPLUS_URL, "MULTIPLUS_URL",
+                "https://multiplus.consignadorapido.com").rstrip("/")
 CONSULTA_URL = BASE_URL + "/consulta/consultas"
 
 DIR_RESULTADOS = Path("resultados")
@@ -239,8 +265,8 @@ def fazer_login(page, usuario, senha):
         senha_input.first.wait_for(state="hidden", timeout=60000)
     except PWTimeout:
         raise RuntimeError(
-            "Falha no login: a tela de login não fechou. "
-            "Confira MULTIPLUS_USUARIO e MULTIPLUS_SENHA no arquivo .env"
+            "Falha no login: a tela de login não fechou. Confira usuário e "
+            "senha na seção CONFIGURAÇÃO do consulta_margem.py (ou no .env)."
         )
     print("[login] OK")
 
@@ -647,12 +673,12 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Consulta margem no Multiplus a partir dos CPFs de uma planilha.")
     p.add_argument("--sheet", "--planilha", dest="sheet",
-                   default=os.getenv("PLANILHA_URL"),
-                   help="URL da planilha Google (padrão: PLANILHA_URL do .env)")
+                   default=_cfg(PLANILHA_URL, "PLANILHA_URL") or None,
+                   help="URL da planilha Google (padrão: PLANILHA_URL da configuração)")
     p.add_argument("--gid", type=int, default=None,
                    help="gid da aba da planilha (padrão: o da URL, ou 0 = Pagina1)")
     p.add_argument("--arquivo", help="CSV/XLSX local com os CPFs (alternativa ao --sheet)")
-    p.add_argument("--coluna", default=os.getenv("COLUNA_CPF", "CPF Cliente"),
+    p.add_argument("--coluna", default=_cfg(COLUNA_CPF, "COLUNA_CPF", "CPF Cliente"),
                    help="Nome da coluna com os CPFs (padrão: 'CPF Cliente')")
     p.add_argument("--cpf", action="append",
                    help="Consulta apenas este CPF (pode repetir a opção)")
@@ -661,13 +687,14 @@ def parse_args():
     p.add_argument("--manter-duplicados", action="store_true",
                    help="Não remove CPFs repetidos da planilha")
     p.add_argument("--headless", action="store_true",
-                   default=os.getenv("HEADLESS", "false").lower() in ("1", "true", "sim"),
+                   default=bool(HEADLESS) or
+                   os.getenv("HEADLESS", "false").lower() in ("1", "true", "sim"),
                    help="Roda sem abrir a janela do navegador")
     p.add_argument("--timeout", type=int,
-                   default=int(os.getenv("TIMEOUT_CONSULTA", "90")),
+                   default=int(float(_cfg(TIMEOUT_CONSULTA, "TIMEOUT_CONSULTA", "90"))),
                    help="Segundos de espera por consulta (padrão: 90)")
     p.add_argument("--pausa", type=float,
-                   default=float(os.getenv("PAUSA_ENTRE_CONSULTAS", "1")),
+                   default=float(_cfg(PAUSA_ENTRE_CONSULTAS, "PAUSA_ENTRE_CONSULTAS", "1")),
                    help="Pausa em segundos entre consultas (padrão: 1)")
     p.add_argument("--saida", help="Caminho do CSV de saída")
     return p.parse_args()
@@ -676,11 +703,12 @@ def parse_args():
 def main():
     args = parse_args()
 
-    usuario = os.getenv("MULTIPLUS_USUARIO")
-    senha = os.getenv("MULTIPLUS_SENHA")
+    usuario = _cfg(MULTIPLUS_USUARIO, "MULTIPLUS_USUARIO")
+    senha = _cfg(MULTIPLUS_SENHA, "MULTIPLUS_SENHA")
     if not usuario or not senha:
-        sys.exit("Defina MULTIPLUS_USUARIO e MULTIPLUS_SENHA no arquivo .env "
-                 "(use o .env.example como modelo).")
+        sys.exit("Preencha MULTIPLUS_USUARIO e MULTIPLUS_SENHA na seção "
+                 "'CONFIGURAÇÃO — EDITE AQUI' no topo do consulta_margem.py "
+                 "(ou num arquivo .env na mesma pasta).")
 
     # ----- lista de CPFs -----
     if args.cpf:

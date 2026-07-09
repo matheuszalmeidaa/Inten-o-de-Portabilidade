@@ -71,15 +71,26 @@ terminal e os arquivos das pastas `resultados/` e `debug/`.
 
 ## Configuração
 
-1. Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`);
-2. Edite o `.env` e preencha `MULTIPLUS_USUARIO` e `MULTIPLUS_SENHA`;
-3. A URL da planilha já vem preenchida. Para o robô conseguir ler a planilha
-   direto do Google, ela precisa estar compartilhada como
-   **"Qualquer pessoa com o link → Leitor"**. Se preferir manter privada,
-   baixe a aba como CSV (*Arquivo → Fazer download → CSV*) e use `--arquivo`.
+Abra o `consulta_margem.py` num editor e preencha a seção
+**`CONFIGURAÇÃO — EDITE AQUI`** no topo do arquivo:
 
-> ⚠️ O `.env` guarda sua senha: ele fica só na sua máquina e já está no
-> `.gitignore` para nunca subir ao GitHub.
+```python
+MULTIPLUS_USUARIO = "SEU_USUARIO"
+MULTIPLUS_SENHA = "SUA_SENHA"
+```
+
+A URL da planilha já vem preenchida ali. Para o robô conseguir ler a planilha
+direto do Google, ela precisa estar compartilhada como
+**"Qualquer pessoa com o link → Leitor"**. Se preferir manter privada,
+baixe a aba como CSV (*Arquivo → Fazer download → CSV*) e use `--arquivo`.
+
+> Alternativa: deixe os campos do script em branco (`""`) e crie um arquivo
+> `.env` na mesma pasta (modelo em `.env.example`). O que estiver preenchido
+> no script tem prioridade sobre o `.env`.
+
+> ⚠️ Com a senha preenchida, **não envie sua cópia do `consulta_margem.py`
+> para o GitHub** nem compartilhe o arquivo — a versão do repositório deve
+> ficar sempre com os campos em branco.
 
 ## Como usar
 

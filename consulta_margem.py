@@ -299,32 +299,53 @@ def diagnostico_pagina(page, nome):
 
 
 def fazer_login(page, usuario, senha):
-    page.goto(BASE_URL, wait_until="domcontentloaded")
-    _esperar_pagina_assentar(page)
-    senha_input = page.locator("input[type='password']")
+    if "consignadorapido" not in page.url or "/consulta" in page.url:
+        page.goto(BASE_URL, wait_until="domcontentloaded")
+        _esperar_pagina_assentar(page)
+    # campos da tela de login do Multiplus (ids reais + fallback genérico)
+    senha_loc = page.locator("#senha, input[type='password']").first
     try:
-        senha_input.first.wait_for(state="visible", timeout=30000)
+        senha_loc.wait_for(state="visible", timeout=45000)
     except PWTimeout:
         # sem campo de senha: ou a sessão já está ativa, ou o site mostrou
         # outra coisa — registra diagnóstico e deixa a próxima etapa decidir
         print(f"[login] tela de login não apareceu (URL atual: {page.url})")
         diagnostico_pagina(page, "login_nao_apareceu")
         return
-    user_input = page.locator(
-        "input[type='text'], input:not([type]), input[type='email']").first
-    user_input.fill(usuario)
-    senha_input.first.fill(senha)
-    clicar_por_texto(page, r"^\s*Entrar\s*$")
+    user_loc = page.locator(
+        "#login, input[placeholder*='login' i], input[type='text'], "
+        "input:not([type]), input[type='email']").first
+    user_loc.fill(usuario)
+    senha_loc.fill(senha)
+    print("[login] usuário e senha preenchidos — clicando em Entrar...")
+    alerta_antes = capturar_alerta(page)
     try:
-        senha_input.first.wait_for(state="hidden", timeout=60000)
-    except PWTimeout:
-        diagnostico_pagina(page, "login_falhou")
-        raise RuntimeError(
-            "Falha no login: a tela de login não fechou. Confira usuário e "
-            "senha na seção CONFIGURAÇÃO do consulta_margem.py (ou no .env)."
-        )
-    _esperar_pagina_assentar(page)
-    print("[login] OK")
+        page.locator("#submit").first.click(timeout=3000)
+    except Exception:
+        clicar_por_texto(page, r"^\s*Entrar\s*$")
+    # senha sumiu = logou; apareceu aviso novo = site recusou o login
+    fim = time.time() + 60
+    while time.time() < fim:
+        try:
+            senha_visivel = senha_loc.is_visible()
+        except Exception:
+            senha_visivel = False  # página navegou: campo não existe mais
+        if not senha_visivel:
+            _esperar_pagina_assentar(page)
+            print("[login] OK")
+            return
+        alerta = capturar_alerta(page)
+        if alerta and alerta != alerta_antes:
+            diagnostico_pagina(page, "login_recusado")
+            raise RuntimeError(
+                f"O site recusou o login: \"{alerta}\" — confira usuário e "
+                "senha na seção CONFIGURAÇÃO do consulta_margem.py.")
+        time.sleep(0.5)
+    diagnostico_pagina(page, "login_falhou")
+    raise RuntimeError(
+        "Falha no login: cliquei em Entrar mas a tela de login não fechou em "
+        "60s e o site não mostrou o motivo. Veja o print em debug/ e confira "
+        "usuário e senha na seção CONFIGURAÇÃO do consulta_margem.py.")
 
 
 def ir_para_consulta(page, usuario=None, senha=None):
@@ -333,13 +354,15 @@ def ir_para_consulta(page, usuario=None, senha=None):
         _esperar_pagina_assentar(page)
     # se o site redirecionou para o login, autentica e volta
     try:
-        if page.locator("input[type='password']").first.is_visible() and usuario and senha:
-            print("[sessão] caiu na tela de login — autenticando...")
-            fazer_login(page, usuario, senha)
-            page.goto(CONSULTA_URL, wait_until="domcontentloaded")
-            _esperar_pagina_assentar(page)
+        precisa_login = page.locator(
+            "#senha, input[type='password']").first.is_visible()
     except Exception:
-        pass
+        precisa_login = False
+    if precisa_login and usuario and senha:
+        print("[sessão] caiu na tela de login — autenticando...")
+        fazer_login(page, usuario, senha)  # se o login falhar, o erro sobe
+        page.goto(CONSULTA_URL, wait_until="domcontentloaded")
+        _esperar_pagina_assentar(page)
     try:
         page.locator(SELETOR_CAMPO_CPF).first.wait_for(
             state="visible", timeout=60000)
@@ -564,7 +587,9 @@ def capturar_alerta(page):
         texto = page.evaluate(
             "() => {" + JS_VISIVEL + """
             const els = Array.from(document.querySelectorAll(
-                "[class*='alert' i], [class*='toast' i], [class*='notif' i], [role='alert'], [class*='swal' i]"))
+                "[class*='alert' i], [class*='toast' i], [class*='notif' i], [role='alert'], " +
+                "[class*='swal' i], [class*='error' i], [class*='erro' i], " +
+                "[class*='invalid' i], [class*='danger' i]"))
                 .filter(vis);
             const txts = els.map(e => (e.innerText || '').trim()).filter(Boolean);
             return txts.length ? txts[0].slice(0, 200) : null;

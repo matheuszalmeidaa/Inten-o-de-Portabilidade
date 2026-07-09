@@ -106,6 +106,12 @@ def so_digitos(texto):
     return re.sub(r"\D", "", str(texto or ""))
 
 
+def limpar_nb(texto):
+    """'6403189763 Esp: 31' -> '6403189763' (a espécie tem coluna própria)."""
+    m = re.search(r"\d{7,13}", str(texto or ""))
+    return m.group(0) if m else str(texto or "").strip()
+
+
 def normalizar_cpf(valor):
     """Converte '017.157.179-70' -> '01715717970'. Devolve None se inválido."""
     dig = so_digitos(valor)
@@ -829,7 +835,7 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
                 preencher_e_consultar(page, cpf)
                 if aguardar_desfecho(page, dados_antes, timeout_s) != "modal":
                     screenshot_debug(page, f"{cpf}_modal_nao_reabriu")
-                    escritor.gravar(cpf, opcao["texto"], {},
+                    escritor.gravar(cpf, limpar_nb(opcao["texto"]), {},
                                     "ERRO: modal não reabriu para este NB")
                     continue
             escolher_nb_e_confirmar(page, opcao["value"])
@@ -847,7 +853,7 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
             else:
                 status = "SEM DADOS (verificar print em debug/)"
                 screenshot_debug(page, f"{cpf}_nb_{opcao['texto']}")
-            escritor.gravar(cpf, opcao["texto"], dados, status)
+            escritor.gravar(cpf, limpar_nb(opcao["texto"]), dados, status)
             print(f"       NB {opcao['texto']}: {dados.get('nome') or '-'} | "
                   f"margem {dados.get('margem') or '-'} | {status}")
         return

@@ -94,6 +94,9 @@ LABELS_CARD = [
 # Mensagens de dialog nativo (alert/confirm) capturadas durante a consulta
 _mensagens_dialog = []
 
+# Últimos eventos de rede (para diagnóstico de falhas de login/consulta)
+_rede_registros = []
+
 
 # ---------------------------------------------------------------------------
 # Leitura dos CPFs (Google Sheets ou arquivo local)
@@ -248,8 +251,35 @@ def registrar_dialogos(page):
     page.on("dialog", _handler)
 
 
-# campo "Digite a Matrícula ou CPF" da tela de consulta
-SELETOR_CAMPO_CPF = "input[placeholder*='cpf' i], input[placeholder*='matr' i]"
+def registrar_rede(page):
+    """Guarda as últimas respostas/falhas de rede para sair no diagnóstico."""
+    def _resposta(resp):
+        try:
+            if resp.request.resource_type in ("document", "xhr", "fetch"):
+                _rede_registros.append(
+                    (resp.request.method, resp.status, resp.url[:160], resp))
+                del _rede_registros[:-20]
+        except Exception:
+            pass
+
+    def _falha(req):
+        try:
+            if req.resource_type in ("document", "xhr", "fetch"):
+                _rede_registros.append(
+                    (req.method, f"FALHOU({req.failure})", req.url[:160], None))
+                del _rede_registros[:-20]
+        except Exception:
+            pass
+
+    page.on("response", _resposta)
+    page.on("requestfailed", _falha)
+
+
+# campo "Digite a Matrícula ou CPF" da tela de consulta.
+# ":visible" é essencial: a página tem campos duplicados escondidos e, sem
+# isso, o robô mira no escondido e espera para sempre.
+SELETOR_CAMPO_CPF = ("input[placeholder*='cpf' i]:visible, "
+                     "input[placeholder*='matr' i]:visible")
 
 
 def _esperar_pagina_assentar(page, timeout_ms=15000):
@@ -283,6 +313,33 @@ def diagnostico_pagina(page, nome):
         except Exception:
             info.append("  (não consegui listar)")
         try:
+            iframes = page.evaluate(
+                "() => Array.from(document.querySelectorAll('iframe'))"
+                ".map(f => (f.src || f.title || 'sem src').slice(0, 120))")
+            if iframes:
+                info.append("")
+                info.append("Iframes na pagina (possivel captcha):")
+                info.extend("  " + s for s in iframes)
+        except Exception:
+            pass
+        if _rede_registros:
+            info.append("")
+            info.append("Rede (ultimas respostas do servidor):")
+            for metodo, status, url, resp in list(_rede_registros)[-15:]:
+                linha = f"  {metodo} {status} {url}"
+                if resp is not None:
+                    try:
+                        interessante = (isinstance(status, int) and status >= 400) \
+                            or re.search(r"login|auth|entrar|logar", url, re.I)
+                        if interessante:
+                            corpo = (resp.text() or "").strip()
+                            corpo = re.sub(r"\s+", " ", corpo)[:250]
+                            if corpo:
+                                linha += f" | corpo: {corpo}"
+                    except Exception:
+                        pass
+                info.append(linha)
+        try:
             texto = page.evaluate(
                 "() => ((document.body && document.body.innerText) || '').slice(0, 1500)")
             info.append("")
@@ -298,39 +355,77 @@ def diagnostico_pagina(page, nome):
         print(f"    [debug] não consegui salvar diagnóstico: {e}")
 
 
+def _ha_senha_visivel(page):
+    """Diz se há campo de senha visível na tela (checagem via JavaScript)."""
+    try:
+        return page.evaluate(
+            "() => {" + JS_VISIVEL + """
+            return Array.from(document.querySelectorAll(
+                "#senha, input[type='password']")).some(vis);
+            }"""
+        )
+    except Exception:
+        return False
+
+
 def fazer_login(page, usuario, senha):
     if "consignadorapido" not in page.url or "/consulta" in page.url:
         page.goto(BASE_URL, wait_until="domcontentloaded")
         _esperar_pagina_assentar(page)
-    # campos da tela de login do Multiplus (ids reais + fallback genérico)
-    senha_loc = page.locator("#senha, input[type='password']").first
+    # campos da tela de login do Multiplus (ids reais + fallback genérico);
+    # só considera campos visíveis — há duplicados escondidos na página
+    senha_loc = page.locator(
+        "#senha:visible, input[type='password']:visible").first
+    usar_js = False
     try:
         senha_loc.wait_for(state="visible", timeout=45000)
     except PWTimeout:
-        # sem campo de senha: ou a sessão já está ativa, ou o site mostrou
-        # outra coisa — registra diagnóstico e deixa a próxima etapa decidir
-        print(f"[login] tela de login não apareceu (URL atual: {page.url})")
-        diagnostico_pagina(page, "login_nao_apareceu")
-        return
-    user_loc = page.locator(
-        "#login, input[placeholder*='login' i], input[type='text'], "
-        "input:not([type]), input[type='email']").first
-    user_loc.fill(usuario)
-    senha_loc.fill(senha)
+        if _ha_senha_visivel(page):
+            # o campo existe mas o Playwright não o considera clicável:
+            # preenche direto via JavaScript
+            usar_js = True
+            print("[login] usando fallback JavaScript para preencher o login")
+        else:
+            # sem campo de senha: ou a sessão já está ativa, ou o site mostrou
+            # outra coisa — registra diagnóstico e deixa a próxima etapa decidir
+            print(f"[login] tela de login não apareceu (URL atual: {page.url})")
+            diagnostico_pagina(page, "login_nao_apareceu")
+            return
+    if usar_js:
+        page.evaluate(
+            "(cred) => {" + JS_VISIVEL + """
+            const u = Array.from(document.querySelectorAll(
+                "#login, input[type='text'], input[type='email'], input:not([type])")).filter(vis)[0];
+            const s = Array.from(document.querySelectorAll(
+                "#senha, input[type='password']")).filter(vis)[0];
+            for (const [el, valor] of [[u, cred.usuario], [s, cred.senha]]) {
+                if (!el) continue;
+                el.value = valor;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            }""",
+            {"usuario": usuario, "senha": senha},
+        )
+    else:
+        user_loc = page.locator(
+            "#login:visible, input[placeholder*='login' i]:visible, "
+            "input[type='text']:visible, input:not([type]):visible, "
+            "input[type='email']:visible").first
+        user_loc.fill(usuario)
+        senha_loc.fill(senha)
     print("[login] usuário e senha preenchidos — clicando em Entrar...")
     alerta_antes = capturar_alerta(page)
     try:
-        page.locator("#submit").first.click(timeout=3000)
+        page.locator("#submit:visible").first.click(timeout=3000)
     except Exception:
         clicar_por_texto(page, r"^\s*Entrar\s*$")
     # senha sumiu = logou; apareceu aviso novo = site recusou o login
-    fim = time.time() + 60
+    inicio = time.time()
+    fim = inicio + 60
+    tentou_enter = False
     while time.time() < fim:
-        try:
-            senha_visivel = senha_loc.is_visible()
-        except Exception:
-            senha_visivel = False  # página navegou: campo não existe mais
-        if not senha_visivel:
+        if not _ha_senha_visivel(page):
             _esperar_pagina_assentar(page)
             print("[login] OK")
             return
@@ -340,12 +435,23 @@ def fazer_login(page, usuario, senha):
             raise RuntimeError(
                 f"O site recusou o login: \"{alerta}\" — confira usuário e "
                 "senha na seção CONFIGURAÇÃO do consulta_margem.py.")
+        if not tentou_enter and time.time() - inicio > 15:
+            print("[login] ainda na tela de login — tentando ENTER no campo de senha...")
+            try:
+                senha_loc.press("Enter", timeout=2000)
+            except Exception:
+                try:
+                    page.keyboard.press("Enter")
+                except Exception:
+                    pass
+            tentou_enter = True
         time.sleep(0.5)
     diagnostico_pagina(page, "login_falhou")
     raise RuntimeError(
         "Falha no login: cliquei em Entrar mas a tela de login não fechou em "
-        "60s e o site não mostrou o motivo. Veja o print em debug/ e confira "
-        "usuário e senha na seção CONFIGURAÇÃO do consulta_margem.py.")
+        "60s e o site não mostrou o motivo. Abra o login_falhou_*.txt em "
+        "debug/ — a seção 'Rede' mostra o que o servidor respondeu. Confira "
+        "também usuário e senha na seção CONFIGURAÇÃO do consulta_margem.py.")
 
 
 def ir_para_consulta(page, usuario=None, senha=None):
@@ -353,11 +459,7 @@ def ir_para_consulta(page, usuario=None, senha=None):
         page.goto(CONSULTA_URL, wait_until="domcontentloaded")
         _esperar_pagina_assentar(page)
     # se o site redirecionou para o login, autentica e volta
-    try:
-        precisa_login = page.locator(
-            "#senha, input[type='password']").first.is_visible()
-    except Exception:
-        precisa_login = False
+    precisa_login = _ha_senha_visivel(page)
     if precisa_login and usuario and senha:
         print("[sessão] caiu na tela de login — autenticando...")
         fazer_login(page, usuario, senha)  # se o login falhar, o erro sobe
@@ -862,6 +964,7 @@ def main():
         page = contexto.new_page()
         page.set_default_timeout(30000)
         registrar_dialogos(page)
+        registrar_rede(page)
 
         fazer_login(page, usuario, senha)
         ir_para_consulta(page, usuario, senha)

@@ -1108,6 +1108,18 @@ def main():
         cpfs = carregar_cpfs(origem, args.coluna, gid=args.gid,
                              manter_duplicados=args.manter_duplicados)
     if args.continuar:
+        alvo = Path(args.continuar)
+        if alvo.suffix.lower() in (".xlsx", ".xls"):
+            irmao = alvo.with_suffix(".csv")
+            if irmao.exists():
+                print(f"[retomada] {alvo.name} é o Excel — usando o CSV "
+                      f"correspondente: {irmao.name}")
+                args.continuar = str(irmao)
+            else:
+                sys.exit("--continuar precisa do arquivo .csv da execução "
+                         f"anterior (não encontrei {irmao}).")
+        if not Path(args.continuar).exists():
+            sys.exit(f"Arquivo para retomar não encontrado: {args.continuar}")
         feitos = cpfs_ja_consultados(args.continuar)
         ja_prontos = len([c for c in cpfs if c in feitos])
         cpfs = [c for c in cpfs if c not in feitos]

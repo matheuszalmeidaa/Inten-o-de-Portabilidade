@@ -102,6 +102,16 @@ python consulta_margem.py --headless
 Outras opções: `--coluna "CPF Cliente"`, `--gid 0` (aba da planilha),
 `--limite N`, `--timeout 120`, `--pausa 2`, `--saida caminho.csv`.
 
+### Retomar uma execução interrompida
+
+Se o robô parar no meio (queda do servidor, falta de memória, Ctrl+C), nada
+se perde: aponte para o CSV da execução anterior e ele **pula o que já foi
+consultado**, reconsulta só os pendentes/com erro e completa o mesmo arquivo:
+
+```bash
+python consulta_margem.py --continuar resultados/resultados_margem_AAAAMMDD_HHMMSS.csv
+```
+
 ## Saída
 
 - `resultados/resultados_margem_AAAAMMDD_HHMMSS.csv` — separado por `;`,

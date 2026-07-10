@@ -91,6 +91,9 @@ LABELS_CARD = [
     "Valor Benefício", "Situação", "Espécie",
 ]
 
+# Avisos do site que se resolvem limpando/tentando de novo (não são "sem dados")
+AVISOS_RETRYAVEIS = r"limpar as tabs|tente novamente|algo deu errado"
+
 # Mensagens de dialog nativo (alert/confirm) capturadas durante a consulta
 _mensagens_dialog = []
 
@@ -110,6 +113,40 @@ def limpar_nb(texto):
     """'6403189763 Esp: 31' -> '6403189763' (a espécie tem coluna própria)."""
     m = re.search(r"\d{7,13}", str(texto or ""))
     return m.group(0) if m else str(texto or "").strip()
+
+
+def formatar_cpf(cpf):
+    """'01715717970' -> '017.157.179-70' (mesmo padrão da planilha)."""
+    d = so_digitos(cpf)
+    if len(d) == 11:
+        return f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
+    return str(cpf or "")
+
+
+def cpfs_ja_consultados(caminho_csv):
+    """CPFs de um CSV anterior que não precisam ser consultados de novo.
+
+    Considera pronto quem tem linha OK ou "sem dados" definitivo; quem tiver
+    QUALQUER linha de erro/aviso contornável volta para a fila inteira.
+    """
+    prontos, pendentes = set(), set()
+    try:
+        with open(caminho_csv, newline="", encoding="utf-8-sig") as arq:
+            for linha in csv.DictReader(arq, delimiter=";"):
+                cpf = normalizar_cpf(linha.get("CPF"))
+                status = (linha.get("Status") or "").strip()
+                if not cpf or not status:
+                    continue
+                ok = status.upper().startswith("OK")
+                sem_dados = (status.upper().startswith("SEM RESULTADO")
+                             and not re.search(AVISOS_RETRYAVEIS, status, re.I))
+                if ok or sem_dados:
+                    prontos.add(cpf)
+                else:
+                    pendentes.add(cpf)
+    except FileNotFoundError:
+        pass
+    return prontos - pendentes
 
 
 def normalizar_cpf(valor):
@@ -822,7 +859,7 @@ class Escritor:
 
     def gravar(self, cpf, nb, dados, status):
         self._csv.writerow({
-            "CPF": cpf,
+            "CPF": formatar_cpf(cpf),
             "NB": nb or dados.get("nb_aba") or "",
             "Nome": dados.get("nome") or "",
             "Idade": dados.get("idade") or "",
@@ -862,7 +899,8 @@ def screenshot_debug(page, nome):
 # Fluxo por CPF
 # ---------------------------------------------------------------------------
 
-def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
+def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha,
+                  retentativa=False):
     garantir_logado_na_consulta(page, usuario, senha)
     fechar_modal_se_aberto(page)
     fechar_avisos(page)  # pop-up esquecido do CPF anterior bloquearia este
@@ -885,13 +923,30 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
         for i, opcao in enumerate(opcoes):
             if i > 0:
                 # reconsulta o mesmo CPF para reabrir o modal e pegar o próximo NB
-                dados_antes = extrair_dados(page)
-                preencher_e_consultar(page, cpf)
-                if aguardar_desfecho(page, dados_antes, timeout_s,
-                                     alerta_antes) != "modal":
+                reaberto = False
+                for chance in (1, 2):
+                    dados_antes = extrair_dados(page)
+                    preencher_e_consultar(page, cpf)
+                    d = aguardar_desfecho(page, dados_antes, timeout_s, alerta_antes)
+                    if d == "modal":
+                        reaberto = True
+                        break
+                    if d == "alerta" and chance == 1:
+                        aviso = _novidade_alerta(capturar_alerta(page), alerta_antes)
+                        fechar_avisos(page)
+                        if aviso and re.search(AVISOS_RETRYAVEIS, aviso, re.I):
+                            print(f"       aviso do site: \"{aviso[:70]}\" — "
+                                  "resolvendo e tentando o NB de novo...")
+                            time.sleep(3)
+                            continue
+                    break
+                if not reaberto:
                     screenshot_debug(page, f"{cpf}_modal_nao_reabriu")
                     escritor.gravar(cpf, limpar_nb(opcao["texto"]), {},
-                                    "ERRO: modal não reabriu para este NB")
+                                    "ERRO: modal não reabriu para este NB "
+                                    "(rode com --continuar para reconsultar)")
+                    print(f"       NB {opcao['texto']}: modal não reabriu — "
+                          "fica para a retomada (--continuar)")
                     continue
             escolher_nb_e_confirmar(page, opcao["value"])
             resultado = aguardar_resultado_pos_modal(page, dados_antes, timeout_s)
@@ -918,6 +973,14 @@ def processar_cpf(page, cpf, escritor, timeout_s, usuario, senha):
     if desfecho == "alerta":
         msg = _novidade_alerta(capturar_alerta(page), alerta_antes)
         fechar_avisos(page)
+        # aviso contornável ("Favor limpar as Tabs...", "Algo deu errado!"):
+        # resolve (o botão de confirmação já foi clicado) e reconsulta o CPF
+        if msg and not retentativa and re.search(AVISOS_RETRYAVEIS, msg, re.I):
+            print(f"    -> aviso do site: \"{msg[:70]}\" — resolvendo e "
+                  "reconsultando o CPF...")
+            time.sleep(3)
+            return processar_cpf(page, cpf, escritor, timeout_s,
+                                 usuario, senha, retentativa=True)
         # alguns avisos são só informativos e os dados carregam em seguida
         fim_graca = time.time() + 5
         dados = extrair_dados(page)
@@ -1016,6 +1079,9 @@ def parse_args():
                    default=float(_cfg(PAUSA_ENTRE_CONSULTAS, "PAUSA_ENTRE_CONSULTAS", "1")),
                    help="Pausa em segundos entre consultas (padrão: 1)")
     p.add_argument("--saida", help="Caminho do CSV de saída")
+    p.add_argument("--continuar", metavar="ARQUIVO.csv",
+                   help="Retoma um CSV de execução anterior: pula os CPFs já "
+                        "consultados, reconsulta os com erro e grava no mesmo arquivo")
     return p.parse_args()
 
 
@@ -1041,9 +1107,22 @@ def main():
                      "ou PLANILHA_URL no .env")
         cpfs = carregar_cpfs(origem, args.coluna, gid=args.gid,
                              manter_duplicados=args.manter_duplicados)
+    if args.continuar:
+        feitos = cpfs_ja_consultados(args.continuar)
+        ja_prontos = len([c for c in cpfs if c in feitos])
+        cpfs = [c for c in cpfs if c not in feitos]
+        args.saida = args.continuar
+        print(f"[retomada] {ja_prontos} CPFs já consultados em "
+              f"{args.continuar} | faltam {len(cpfs)}")
     if args.limite:
         cpfs = cpfs[:args.limite]
     if not cpfs:
+        if args.continuar:
+            xlsx = Escritor(args.continuar).fechar_e_gerar_xlsx()
+            print("[retomada] nada pendente — todos os CPFs já estavam consultados.")
+            if xlsx:
+                print(f"[fim] XLSX: {xlsx}")
+            return
         sys.exit("Nenhum CPF para consultar.")
 
     # Em servidor Linux sem interface gráfica não dá para abrir a janela do
@@ -1127,6 +1206,15 @@ def main():
                 barra_progresso(i, len(cpfs), inicio_lote, escritor.linhas)
                 if i < len(cpfs):  # no último CPF encerra direto, sem pausa
                     time.sleep(args.pausa)
+                    if i % 20 == 0:
+                        # recarrega a tela periodicamente: descarta as "tabs"
+                        # acumuladas e segura o consumo de memória do navegador
+                        print("[manutenção] recarregando a tela para liberar memória...")
+                        try:
+                            page.reload(wait_until="domcontentloaded")
+                            _esperar_pagina_assentar(page)
+                        except Exception:
+                            pass
         except KeyboardInterrupt:
             print("\n[interrompido] resultados parciais já estão salvos no CSV.")
         finally:
